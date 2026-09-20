@@ -88,6 +88,20 @@ CREATE TABLE IF NOT EXISTS source_runs (
     last_error TEXT,
     item_count INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS scan_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    interval_hours REAL NOT NULL,
+    status TEXT NOT NULL,
+    collected INTEGER NOT NULL DEFAULT 0,
+    inserted INTEGER NOT NULL DEFAULT 0,
+    eligible INTEGER NOT NULL DEFAULT 0,
+    rejected INTEGER NOT NULL DEFAULT 0,
+    evaluated INTEGER NOT NULL DEFAULT 0,
+    error TEXT
+);
 """
 
 OPPORTUNITY_MIGRATIONS = {
@@ -338,6 +352,57 @@ class Database:
                 """,
                 (source, now, now if success else None, error, item_count),
             )
+
+    def start_scan_run(self, interval_hours: float) -> int:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO scan_runs (started_at, interval_hours, status)
+                VALUES (?, ?, 'running')
+                """,
+                (utc_now_iso(), interval_hours),
+            )
+            return int(cursor.lastrowid)
+
+    def finish_scan_run(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        collected: int = 0,
+        inserted: int = 0,
+        eligible: int = 0,
+        rejected: int = 0,
+        evaluated: int = 0,
+        error: str | None = None,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE scan_runs SET
+                    finished_at = ?, status = ?, collected = ?, inserted = ?,
+                    eligible = ?, rejected = ?, evaluated = ?, error = ?
+                WHERE id = ?
+                """,
+                (
+                    utc_now_iso(),
+                    status,
+                    collected,
+                    inserted,
+                    eligible,
+                    rejected,
+                    evaluated,
+                    error,
+                    run_id,
+                ),
+            )
+
+    def recent_scan_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM scan_runs ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     @staticmethod
     def _row_to_opportunity(row: sqlite3.Row) -> Opportunity:

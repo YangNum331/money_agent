@@ -22,6 +22,19 @@ class Settings:
     min_budget_usd: float = field(
         default_factory=lambda: _float_env("MONEY_AGENT_MIN_BUDGET_USD", 20.0)
     )
+    scan_interval_hours: float = field(
+        default_factory=lambda: _float_env("MONEY_AGENT_SCAN_INTERVAL_HOURS", 6.0)
+    )
+    daemon_log_path: Path = field(
+        default_factory=lambda: Path(
+            os.getenv("MONEY_AGENT_DAEMON_LOG", "logs/money_agent.log")
+        )
+    )
+    daemon_pid_path: Path = field(
+        default_factory=lambda: Path(
+            os.getenv("MONEY_AGENT_DAEMON_PID", "data/money_agent_daemon.pid")
+        )
+    )
     github_token: str | None = field(default_factory=lambda: os.getenv("GITHUB_TOKEN"))
     github_min_stars: int = field(
         default_factory=lambda: int(os.getenv("MONEY_AGENT_GITHUB_MIN_STARS", "10"))

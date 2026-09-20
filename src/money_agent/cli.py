@@ -3,28 +3,19 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import timedelta
 
 from .collectors.github import GitHubCollector
-from .collectors.jobicy import JobicyCollector
-from .collectors.remotive import RemotiveCollector
 from .config import Settings
 from .database import Database
 from .evaluators import HeuristicEvaluator, OpenAICompatibleEvaluator
 from .filters import RuleFilter
+from .scanner import DEFAULT_GITHUB_QUERIES, collect_all_sources
 from .service import (
     SourceResult,
     apply_filters,
-    collect_source,
     evaluate_candidates,
     store_opportunities,
 )
-
-DEFAULT_GITHUB_QUERIES = [
-    'label:bounty (python OR javascript OR "bug fix")',
-    '"bounty" (automation OR script OR API)',
-    '"reward" (python OR javascript OR API)',
-]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -88,12 +79,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "collect-all":
-        results = _collect_all(database, settings, force=args.force)
+        results = collect_all_sources(database, settings, force=args.force)
         _print_collection_results(results)
         return 0 if any(not result.error for result in results) else 1
 
     if args.command == "run":
-        results = _collect_all(
+        results = collect_all_sources(
             database,
             settings,
             queries=args.queries,
@@ -152,43 +143,6 @@ def _collect(
         per_query=per_query,
     )
     return store_opportunities(database, opportunities)
-
-
-def _collect_all(
-    database: Database,
-    settings: Settings,
-    *,
-    queries: list[str] | None = None,
-    per_query: int = 10,
-    min_stars: int | None = None,
-    min_age_days: int | None = None,
-    force: bool = False,
-) -> list[SourceResult]:
-    github = GitHubCollector(
-        token=settings.github_token,
-        min_repository_stars=(
-            settings.github_min_stars if min_stars is None else max(min_stars, 0)
-        ),
-        min_repository_age_days=(
-            settings.github_min_age_days if min_age_days is None else max(min_age_days, 0)
-        ),
-    )
-    definitions = [
-        (
-            "github",
-            timedelta(hours=1),
-            lambda: github.collect(
-                queries=queries or DEFAULT_GITHUB_QUERIES,
-                per_query=per_query,
-            ),
-        ),
-        ("jobicy", timedelta(hours=1), lambda: JobicyCollector().collect()),
-        ("remotive", timedelta(hours=6), RemotiveCollector().collect),
-    ]
-    return [
-        collect_source(database, source, interval, fetch, force=force)
-        for source, interval, fetch in definitions
-    ]
 
 
 def _print_collection_results(results: list[SourceResult]) -> None:

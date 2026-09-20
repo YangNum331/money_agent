@@ -1,0 +1,13 @@
+services:
+  money-agent:
+    build: .
+    restart: unless-stopped
+    environment:
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      MONEY_AGENT_SCAN_INTERVAL_HOURS: "6"
+      MONEY_AGENT_DB: /app/data/money_agent.db
+      MONEY_AGENT_DAEMON_LOG: /app/logs/money_agent.log
+      MONEY_AGENT_DAEMON_PID: /app/data/money_agent_daemon.pid
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs

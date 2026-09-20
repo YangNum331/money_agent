@@ -6,6 +6,8 @@ from money_agent.collectors.common import parse_usd_salary
 from money_agent.collectors.github import _repository_name, extract_usd_amounts
 from money_agent.collectors.jobicy import JobicyCollector
 from money_agent.collectors.remotive import RemotiveCollector
+from money_agent.config import Settings
+from money_agent.daemon import configure_logging, run_scan_cycle
 from money_agent.database import Database
 from money_agent.evaluators import HeuristicEvaluator, normalized_income_value
 from money_agent.filters import RuleFilter
@@ -13,6 +15,7 @@ from money_agent.gui import MoneyAgentGui
 from money_agent.models import Opportunity
 from money_agent.ranking import expected_profit, opportunity_score
 from money_agent.service import (
+    SourceResult,
     apply_filters,
     collect_source,
     evaluate_candidates,
@@ -245,3 +248,35 @@ def test_gui_close_terminates_process(monkeypatch) -> None:
 
     assert calls == ["quit", "destroy", "exit:0"]
     assert app.closing
+
+
+def test_daemon_cycle_persists_history_and_log(tmp_path: Path, monkeypatch) -> None:
+    settings = Settings(
+        db_path=tmp_path / "daemon.db",
+        daemon_log_path=tmp_path / "money_agent.log",
+        daemon_pid_path=tmp_path / "daemon.pid",
+    )
+    source_results = [
+        SourceResult(source="github", collected=3, inserted=2),
+        SourceResult(source="jobicy", collected=10, inserted=4),
+        SourceResult(source="remotive", error="temporary failure"),
+    ]
+    monkeypatch.setattr(
+        "money_agent.daemon.collect_all_sources",
+        lambda _database, _settings: source_results,
+    )
+    logger = configure_logging(settings.daemon_log_path)
+
+    summary = run_scan_cycle(settings, logger)
+
+    for handler in logger.handlers:
+        handler.close()
+    assert summary.status == "partial"
+    assert summary.collected == 13
+    assert summary.inserted == 6
+    history = Database(settings.db_path).recent_scan_runs()
+    assert history[0]["status"] == "partial"
+    assert history[0]["finished_at"] is not None
+    log_text = settings.daemon_log_path.read_text(encoding="utf-8")
+    assert "검색 #1 완료" in log_text
+    assert "remotive: 수집 실패" in log_text

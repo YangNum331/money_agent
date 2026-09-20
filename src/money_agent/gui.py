@@ -10,7 +10,6 @@ from tkinter import BOTH, END, LEFT, RIGHT, BooleanVar, StringVar, Tk, X, ttk
 from tkinter.scrolledtext import ScrolledText
 from typing import Any
 
-from .cli import DEFAULT_GITHUB_QUERIES
 from .collectors.github import GitHubCollector
 from .collectors.jobicy import JobicyCollector
 from .collectors.remotive import RemotiveCollector
@@ -18,6 +17,7 @@ from .config import Settings
 from .database import Database
 from .evaluators import HeuristicEvaluator
 from .filters import RuleFilter
+from .scanner import DEFAULT_GITHUB_QUERIES
 from .service import apply_filters, collect_source, evaluate_candidates
 
 WINDOW_TITLE = "MONEY_AGENT — Opportunity Scanner"
