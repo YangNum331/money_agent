@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import traceback
@@ -45,9 +46,11 @@ class MoneyAgentGui:
         self.status_text = StringVar(value="준비됨")
         self.summary_text = StringVar(value="아직 실행하지 않았습니다")
         self.result_urls: dict[str, str] = {}
+        self.closing = False
 
         self._configure_styles()
         self._build_layout()
+        self.root.protocol("WM_DELETE_WINDOW", self._close_window)
         self.root.after(100, self._poll_events)
 
     def _configure_styles(self) -> None:
@@ -314,6 +317,8 @@ class MoneyAgentGui:
         self.events.put((kind, payload))
 
     def _poll_events(self) -> None:
+        if self.closing:
+            return
         try:
             while True:
                 kind, payload = self.events.get_nowait()
@@ -334,7 +339,8 @@ class MoneyAgentGui:
                     self._finish_run("오류")
         except queue.Empty:
             pass
-        self.root.after(100, self._poll_events)
+        if not self.closing:
+            self.root.after(100, self._poll_events)
 
     def _append_log(self, message: str, level: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -381,6 +387,20 @@ class MoneyAgentGui:
         self.running.set(False)
         self.status_text.set(status)
         self.run_button.configure(state="normal", text="다시 탐색")
+
+    def _close_window(self) -> None:
+        """Close the window and terminate any in-flight network worker immediately."""
+        if self.closing:
+            return
+        self.closing = True
+        try:
+            self.root.quit()
+            self.root.destroy()
+        finally:
+            # A worker can be blocked inside an OS/network call. Python daemon threads normally
+            # disappear at shutdown, but a hard process exit guarantees Windows never leaves a
+            # headless pythonw.exe behind after the user closes the only window.
+            os._exit(0)
 
 
 def _format_income(row: dict[str, object]) -> str:

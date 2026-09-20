@@ -9,6 +9,7 @@ from money_agent.collectors.remotive import RemotiveCollector
 from money_agent.database import Database
 from money_agent.evaluators import HeuristicEvaluator, normalized_income_value
 from money_agent.filters import RuleFilter
+from money_agent.gui import MoneyAgentGui
 from money_agent.models import Opportunity
 from money_agent.ranking import expected_profit, opportunity_score
 from money_agent.service import (
@@ -223,3 +224,24 @@ def test_database_migrates_v01_opportunities(tmp_path: Path) -> None:
     columns = {row[1] for row in connection.execute("PRAGMA table_info(opportunities)")}
     connection.close()
     assert {"kind", "income_basis", "organization", "location"} <= columns
+
+
+def test_gui_close_terminates_process(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeRoot:
+        def quit(self) -> None:
+            calls.append("quit")
+
+        def destroy(self) -> None:
+            calls.append("destroy")
+
+    app = MoneyAgentGui.__new__(MoneyAgentGui)
+    app.root = FakeRoot()
+    app.closing = False
+    monkeypatch.setattr("money_agent.gui.os._exit", lambda code: calls.append(f"exit:{code}"))
+
+    app._close_window()
+
+    assert calls == ["quit", "destroy", "exit:0"]
+    assert app.closing
