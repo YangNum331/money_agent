@@ -11,6 +11,7 @@ This repository currently implements the first executable slice of v0.1:
 - optional OpenAI-compatible JSON evaluation;
 - expected-profit and opportunity-score ranking;
 - a CLI leaderboard;
+- a Windows desktop UI with live execution logs and a ranked results table;
 - no bids, pull requests, messages, payments, or other external actions.
 
 The estimates are decision aids, not promises of income. Platform rules, bounty terms, tax obligations, and submission requirements still need human review.
@@ -18,6 +19,18 @@ The estimates are decision aids, not promises of income. Platform rules, bounty 
 ## Quick start
 
 Python 3.11 or newer is required.
+
+### Windows one-click UI
+
+1. Install Python 3.11 or newer from python.org and enable `Add Python to PATH`.
+2. Double-click `run_gui.bat` in the project folder.
+3. In the MONEY_AGENT window, click **기회 탐색 시작**.
+
+The first launch creates `.venv` and installs the small set of dependencies. Later launches reuse it. The window remains responsive while collection runs, streams each pipeline stage into the log, and shows the top opportunities in a table. Double-click a result row to open its source page.
+
+For a higher GitHub API rate limit, copy `.env.example` to `.env` and set `GITHUB_TOKEN`. The UI still works without it, but GitHub may limit repeated searches.
+
+### Command line
 
 ```bash
 python -m venv .venv

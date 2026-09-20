@@ -23,6 +23,7 @@ dev = [
 
 [project.scripts]
 money-agent = "money_agent.cli:main"
+money-agent-gui = "money_agent.gui:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/money_agent"]
