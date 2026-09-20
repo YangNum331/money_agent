@@ -4,6 +4,7 @@ import json
 import sqlite3
 from collections.abc import Iterable
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,10 @@ CREATE TABLE IF NOT EXISTS opportunities (
     created_at TEXT,
     skills_json TEXT NOT NULL DEFAULT '[]',
     language TEXT,
+    kind TEXT NOT NULL DEFAULT 'bounty',
+    income_basis TEXT NOT NULL DEFAULT 'one_time',
+    organization TEXT,
+    location TEXT,
     status TEXT NOT NULL DEFAULT 'discovered',
     content_hash TEXT NOT NULL,
     discovered_at TEXT NOT NULL,
@@ -75,7 +80,22 @@ CREATE TABLE IF NOT EXISTS earnings (
     profit REAL NOT NULL DEFAULT 0,
     recorded_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS source_runs (
+    source TEXT PRIMARY KEY,
+    last_started_at TEXT NOT NULL,
+    last_success_at TEXT,
+    last_error TEXT,
+    item_count INTEGER NOT NULL DEFAULT 0
+);
 """
+
+OPPORTUNITY_MIGRATIONS = {
+    "kind": "TEXT NOT NULL DEFAULT 'bounty'",
+    "income_basis": "TEXT NOT NULL DEFAULT 'one_time'",
+    "organization": "TEXT",
+    "location": "TEXT",
+}
 
 
 class Database:
@@ -100,6 +120,14 @@ class Database:
     def initialize(self) -> None:
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            existing = {
+                row["name"] for row in connection.execute("PRAGMA table_info(opportunities)")
+            }
+            for name, definition in OPPORTUNITY_MIGRATIONS.items():
+                if name not in existing:
+                    connection.execute(
+                        f"ALTER TABLE opportunities ADD COLUMN {name} {definition}"
+                    )
 
     def upsert_opportunity(self, opportunity: Opportunity) -> tuple[int, bool]:
         now = utc_now_iso()
@@ -115,6 +143,10 @@ class Database:
             opportunity.created_at,
             json.dumps(opportunity.skills, ensure_ascii=False),
             opportunity.language,
+            opportunity.kind,
+            opportunity.income_basis,
+            opportunity.organization,
+            opportunity.location,
             opportunity.status,
             opportunity.content_hash,
             now,
@@ -130,9 +162,9 @@ class Database:
                     """
                     INSERT INTO opportunities (
                         source, external_id, title, description, url, budget_min, budget_max,
-                        currency, created_at, skills_json, language, status, content_hash,
-                        discovered_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        currency, created_at, skills_json, language, kind, income_basis,
+                        organization, location, status, content_hash, discovered_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     values,
                 )
@@ -142,7 +174,8 @@ class Database:
                 """
                 UPDATE opportunities SET
                     title = ?, description = ?, url = ?, budget_min = ?, budget_max = ?,
-                    currency = ?, created_at = ?, skills_json = ?, language = ?, status = ?,
+                    currency = ?, created_at = ?, skills_json = ?, language = ?, kind = ?,
+                    income_basis = ?, organization = ?, location = ?, status = ?,
                     content_hash = ?, updated_at = ?
                 WHERE id = ?
                 """,
@@ -156,6 +189,10 @@ class Database:
                     opportunity.created_at,
                     json.dumps(opportunity.skills, ensure_ascii=False),
                     opportunity.language,
+                    opportunity.kind,
+                    opportunity.income_basis,
+                    opportunity.organization,
+                    opportunity.location,
                     opportunity.status,
                     opportunity.content_hash,
                     now,
@@ -234,6 +271,7 @@ class Database:
             rows = connection.execute(
                 """
                 SELECT o.id, o.source, o.title, o.url, o.budget_min, o.budget_max,
+                       o.kind, o.income_basis, o.organization, o.location,
                        e.evaluator, e.opportunity_score, e.expected_profit,
                        e.success_probability, e.reason
                 FROM evaluations e
@@ -262,6 +300,45 @@ class Database:
         result["total"] = sum(value for key, value in result.items() if key != "evaluated")
         return result
 
+    def source_due(self, source: str, minimum_interval: timedelta) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT last_success_at FROM source_runs WHERE source = ?",
+                (source,),
+            ).fetchone()
+        if row is None or not row["last_success_at"]:
+            return True
+        last_success = datetime.fromisoformat(row["last_success_at"])
+        return datetime.now(UTC) - last_success >= minimum_interval
+
+    def record_source_run(
+        self,
+        source: str,
+        *,
+        success: bool,
+        item_count: int = 0,
+        error: str | None = None,
+    ) -> None:
+        now = utc_now_iso()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO source_runs (
+                    source, last_started_at, last_success_at, last_error, item_count
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(source) DO UPDATE SET
+                    last_started_at = excluded.last_started_at,
+                    last_success_at = CASE
+                        WHEN excluded.last_success_at IS NOT NULL
+                        THEN excluded.last_success_at
+                        ELSE source_runs.last_success_at
+                    END,
+                    last_error = excluded.last_error,
+                    item_count = excluded.item_count
+                """,
+                (source, now, now if success else None, error, item_count),
+            )
+
     @staticmethod
     def _row_to_opportunity(row: sqlite3.Row) -> Opportunity:
         return Opportunity(
@@ -277,6 +354,9 @@ class Database:
             created_at=row["created_at"],
             skills=json.loads(row["skills_json"]),
             language=row["language"],
+            kind=row["kind"],
+            income_basis=row["income_basis"],
+            organization=row["organization"],
+            location=row["location"],
             status=row["status"],
         )
-

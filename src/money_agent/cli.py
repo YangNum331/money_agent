@@ -3,13 +3,22 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import timedelta
 
 from .collectors.github import GitHubCollector
+from .collectors.jobicy import JobicyCollector
+from .collectors.remotive import RemotiveCollector
 from .config import Settings
 from .database import Database
 from .evaluators import HeuristicEvaluator, OpenAICompatibleEvaluator
 from .filters import RuleFilter
-from .service import apply_filters, evaluate_candidates, store_opportunities
+from .service import (
+    SourceResult,
+    apply_filters,
+    collect_source,
+    evaluate_candidates,
+    store_opportunities,
+)
 
 DEFAULT_GITHUB_QUERIES = [
     'label:bounty (python OR javascript OR "bug fix")',
@@ -31,6 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--min-stars", type=int)
     collect.add_argument("--min-age-days", type=int)
 
+    collect_all = subparsers.add_parser(
+        "collect-all", help="Collect GitHub bounties and broad remote jobs"
+    )
+    collect_all.add_argument("--force", action="store_true")
+
     run = subparsers.add_parser("run", help="Collect, filter, evaluate, and show rankings")
     run.add_argument("--query", action="append", dest="queries")
     run.add_argument("--per-query", type=int, default=30)
@@ -39,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--evaluate-limit", type=int, default=30)
     run.add_argument("--top", type=int, default=5)
     run.add_argument("--evaluator", choices=("heuristic", "llm"), default="heuristic")
+    run.add_argument("--force", action="store_true", help="Ignore source refresh intervals")
 
     rank = subparsers.add_parser("rank", help="Show saved top opportunities")
     rank.add_argument("--top", type=int, default=10)
@@ -72,20 +87,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Collected {result.collected}; inserted {result.inserted}")
         return 0
 
+    if args.command == "collect-all":
+        results = _collect_all(database, settings, force=args.force)
+        _print_collection_results(results)
+        return 0 if any(not result.error for result in results) else 1
+
     if args.command == "run":
-        collected = _collect(
+        results = _collect_all(
             database,
             settings,
-            args.queries,
-            args.per_query,
-            args.min_stars,
-            args.min_age_days,
+            queries=args.queries,
+            per_query=args.per_query,
+            min_stars=args.min_stars,
+            min_age_days=args.min_age_days,
+            force=args.force,
         )
         filtered = apply_filters(database, RuleFilter(settings.min_budget_usd))
         evaluator = _make_evaluator(args.evaluator, settings)
         evaluated = evaluate_candidates(database, evaluator, args.evaluate_limit)
+        collected = sum(result.collected for result in results)
+        inserted = sum(result.inserted for result in results)
+        _print_collection_results(results)
         print(
-            f"Collected {collected.collected} ({collected.inserted} new); "
+            f"Collected {collected} ({inserted} new); "
             f"eligible {filtered.eligible}; rejected {filtered.rejected}; "
             f"evaluated {evaluated.evaluated}"
         )
@@ -128,6 +152,53 @@ def _collect(
         per_query=per_query,
     )
     return store_opportunities(database, opportunities)
+
+
+def _collect_all(
+    database: Database,
+    settings: Settings,
+    *,
+    queries: list[str] | None = None,
+    per_query: int = 10,
+    min_stars: int | None = None,
+    min_age_days: int | None = None,
+    force: bool = False,
+) -> list[SourceResult]:
+    github = GitHubCollector(
+        token=settings.github_token,
+        min_repository_stars=(
+            settings.github_min_stars if min_stars is None else max(min_stars, 0)
+        ),
+        min_repository_age_days=(
+            settings.github_min_age_days if min_age_days is None else max(min_age_days, 0)
+        ),
+    )
+    definitions = [
+        (
+            "github",
+            timedelta(hours=1),
+            lambda: github.collect(
+                queries=queries or DEFAULT_GITHUB_QUERIES,
+                per_query=per_query,
+            ),
+        ),
+        ("jobicy", timedelta(hours=1), lambda: JobicyCollector().collect()),
+        ("remotive", timedelta(hours=6), RemotiveCollector().collect),
+    ]
+    return [
+        collect_source(database, source, interval, fetch, force=force)
+        for source, interval, fetch in definitions
+    ]
+
+
+def _print_collection_results(results: list[SourceResult]) -> None:
+    for result in results:
+        if result.cached:
+            print(f"{result.source}: cached")
+        elif result.error:
+            print(f"{result.source}: ERROR {result.error}")
+        else:
+            print(f"{result.source}: {result.collected} collected, {result.inserted} new")
 
 
 def _make_evaluator(kind: str, settings: Settings):

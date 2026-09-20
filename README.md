@@ -1,12 +1,15 @@
 # MONEY_AGENT
 
-MONEY_AGENT is a local-first, human-gated system that discovers paid technical work, removes poor candidates cheaply, and ranks the remainder by expected economic value.
+MONEY_AGENT is a local-first, human-gated system that discovers online earning opportunities, removes poor candidates cheaply, and ranks the remainder by expected economic value.
 
-This repository currently implements the first executable slice of v0.1:
+Version 0.2 includes:
 
 - paid GitHub issue collection through the official API;
+- broad remote-job collection from the public Jobicy and Remotive APIs, including writing, design, marketing, customer support, translation, operations, and technical roles;
 - SQLite persistence and source-level deduplication;
-- rule-based budget, task-type, and risk filtering;
+- one-hour source caching for GitHub and Jobicy and six-hour caching for Remotive;
+- rule-based budget, location, seniority, task-type, and risk filtering;
+- salary normalization across hourly, weekly, monthly, annual, and one-time payments;
 - zero-API-cost heuristic evaluation;
 - optional OpenAI-compatible JSON evaluation;
 - expected-profit and opportunity-score ranking;
@@ -24,7 +27,7 @@ Python 3.11 or newer is required.
 
 1. Install Python 3.11 or newer from python.org and enable `Add Python to PATH`.
 2. Double-click `run_gui.bat` in the project folder.
-3. In the MONEY_AGENT window, click **기회 탐색 시작**.
+3. In the MONEY_AGENT window, click **기회 탐색 시작**. One click scans all three sources.
 
 The first launch creates `.venv` and installs the small set of dependencies. Later launches reuse it. The window remains responsive while collection runs, streams each pipeline stage into the log, and shows the top opportunities in a table. Double-click a result row to open its source page.
 
@@ -44,7 +47,8 @@ The CLI loads `.env` from the current directory. A GitHub token is optional but 
 
 ```bash
 money-agent init-db
-money-agent run --per-query 20 --top 5
+money-agent run --per-query 20 --top 10
+money-agent collect-all
 money-agent stats
 money-agent rank --top 10
 ```
@@ -63,11 +67,19 @@ To use an OpenAI-compatible provider, set `LLM_API_KEY`, `LLM_BASE_URL`, and `LL
 money-agent run --evaluator llm --evaluate-limit 10
 ```
 
-The default heuristic evaluator makes no paid model calls. Evaluations are cached by opportunity content hash, evaluator, and model name.
+The default heuristic evaluator makes no paid model calls. Evaluations are cached by opportunity content hash, evaluator, and model name. Use `--force` only when you intentionally want to bypass source refresh intervals.
+
+## Sources and attribution
+
+- GitHub results retain and open the original issue URL.
+- Jobicy results come from [Jobicy's public remote-jobs API](https://jobicy.com/jobs-rss-feed) and retain the original listing URL.
+- Remotive results come from [Remotive's public remote-jobs API](https://github.com/remotive-com/remote-jobs-api) and retain the original Remotive listing URL.
+
+The app only indexes public listings. It does not scrape login-only marketplaces or claim that a listing is legitimate. Always verify eligibility, contract terms, payment method, local tax obligations, and whether the employer accepts applicants in Korea.
 
 ## Safety boundary
 
-v0.1 only reads public opportunity data and writes to a local SQLite database. It does not:
+v0.2 only reads public opportunity data and writes to a local SQLite database. It does not:
 
 - submit bids or pull requests;
 - send client messages;
@@ -86,7 +98,9 @@ Expected profit is estimated as:
 revenue × success probability − API cost − platform cost − risk cost
 ```
 
-Opportunity score is a 0–100 prioritization score combining expected profit, automation potential, success probability, difficulty, competition, platform risk, and estimated time. The v0.1 coefficients are provisional and should be recalibrated from real outcomes.
+For a remote job, the comparable revenue basis is one month of annual/monthly salary or one week of hourly/weekly pay. The expected value is then weighted by a deliberately conservative application-success estimate. A missing salary is displayed as `미공개` and contributes no estimated monetary value.
+
+Opportunity score is a 0–100 prioritization score combining expected profit, automation potential, success probability, difficulty, competition, platform risk, and estimated time. The v0.2 coefficients are provisional and should be recalibrated from real outcomes.
 
 ## Development
 
@@ -97,8 +111,7 @@ ruff check .
 
 ## Roadmap
 
-1. Add fixture-backed integration tests and resilient GitHub rate-limit handling.
-2. Add a Freelancer collector only after confirming current official API access and terms.
-3. Add cheap/strong model routing with token and dollar budgets.
+1. Add user-editable region, role, and keyword preferences in the desktop UI.
+2. Add more sources only when a stable official API and acceptable terms are available.
+3. Add outcome tracking so ranking coefficients can be calibrated from real applications.
 4. Add an approval inbox before any external submission capability.
-5. Add a sandboxed coding worker and an independent verifier.

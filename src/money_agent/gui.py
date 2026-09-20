@@ -4,20 +4,20 @@ import queue
 import threading
 import traceback
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta
 from tkinter import BOTH, END, LEFT, RIGHT, BooleanVar, StringVar, Tk, X, ttk
 from tkinter.scrolledtext import ScrolledText
 from typing import Any
 
-import httpx
-
 from .cli import DEFAULT_GITHUB_QUERIES
 from .collectors.github import GitHubCollector
+from .collectors.jobicy import JobicyCollector
+from .collectors.remotive import RemotiveCollector
 from .config import Settings
 from .database import Database
 from .evaluators import HeuristicEvaluator
 from .filters import RuleFilter
-from .service import apply_filters, evaluate_candidates, store_opportunities
+from .service import apply_filters, collect_source, evaluate_candidates
 
 WINDOW_TITLE = "MONEY_AGENT — Opportunity Scanner"
 BACKGROUND = "#0d1117"
@@ -128,7 +128,7 @@ class MoneyAgentGui:
         ttk.Label(title_group, text="MONEY_AGENT", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             title_group,
-            text="유료 코딩 기회를 수집하고 기대수익 순으로 정리합니다.",
+            text="GitHub 보상 작업과 전 분야 원격 일자리를 찾아 가치 순으로 정리합니다.",
             style="Subtitle.TLabel",
         ).pack(anchor="w", pady=(4, 0))
 
@@ -156,18 +156,20 @@ class MoneyAgentGui:
             style="Summary.TLabel",
         ).pack(side=RIGHT)
 
-        columns = ("score", "budget", "profit", "source", "title")
+        columns = ("score", "kind", "budget", "profit", "source", "title")
         self.results = ttk.Treeview(result_panel, columns=columns, show="headings", height=9)
         self.results.heading("score", text="점수")
-        self.results.heading("budget", text="예산")
-        self.results.heading("profit", text="기대수익")
+        self.results.heading("kind", text="유형")
+        self.results.heading("budget", text="보수")
+        self.results.heading("profit", text="기대가치")
         self.results.heading("source", text="출처")
         self.results.heading("title", text="작업명")
         self.results.column("score", width=70, minwidth=60, anchor="center", stretch=False)
-        self.results.column("budget", width=95, minwidth=80, anchor="e", stretch=False)
-        self.results.column("profit", width=100, minwidth=90, anchor="e", stretch=False)
-        self.results.column("source", width=90, minwidth=75, anchor="center", stretch=False)
-        self.results.column("title", width=560, minwidth=260, anchor="w")
+        self.results.column("kind", width=75, minwidth=65, anchor="center", stretch=False)
+        self.results.column("budget", width=115, minwidth=95, anchor="e", stretch=False)
+        self.results.column("profit", width=105, minwidth=90, anchor="e", stretch=False)
+        self.results.column("source", width=85, minwidth=75, anchor="center", stretch=False)
+        self.results.column("title", width=470, minwidth=240, anchor="w")
         self.results.pack(fill=BOTH, expand=True)
         self.results.bind("<Double-1>", self._open_selected_result)
 
@@ -196,7 +198,9 @@ class MoneyAgentGui:
         self.log.tag_configure("success", foreground=SUCCESS)
         self.log.tag_configure("warning", foreground=WARNING)
         self.log.tag_configure("error", foreground=ERROR)
-        self._append_log("창이 준비됐습니다. '기회 탐색 시작'을 누르세요.", "success")
+        self._append_log(
+            "창이 준비됐습니다. '기회 탐색 시작'을 누르세요.", "success"
+        )
 
     def _start_run(self) -> None:
         if self.running.get():
@@ -204,7 +208,7 @@ class MoneyAgentGui:
         self.running.set(True)
         self.run_button.configure(state="disabled", text="탐색 중…")
         self.status_text.set("실행 중")
-        self.summary_text.set("GitHub를 조사하고 있습니다")
+        self.summary_text.set("세 개 출처를 조사하고 있습니다")
         self._clear_results()
         self._append_log("새 탐색을 시작합니다.", "info")
         threading.Thread(target=self._run_pipeline, daemon=True).start()
@@ -216,30 +220,59 @@ class MoneyAgentGui:
             self._emit("log", (f"데이터베이스 준비: {settings.db_path}", "info"))
             database.initialize()
 
-            token_state = "설정됨" if settings.github_token else "미설정(낮은 요청 한도)"
-            self._emit("log", (f"GitHub 토큰: {token_state}", "warning"))
-            self._emit(
-                "log",
-                (
-                    "1/4 GitHub에서 유료 작업 후보를 찾는 중… "
-                    f"(저장소 별 {settings.github_min_stars}+, "
-                    f"생성 {settings.github_min_age_days}일+)",
-                    "info",
-                ),
+            token_state = (
+                "설정됨" if settings.github_token else "미설정(낮은 요청 한도)"
             )
-            collector = GitHubCollector(
+            self._emit("log", (f"GitHub 토큰: {token_state}", "warning"))
+            github = GitHubCollector(
                 token=settings.github_token,
                 min_repository_stars=settings.github_min_stars,
                 min_repository_age_days=settings.github_min_age_days,
             )
-            opportunities = collector.collect(queries=DEFAULT_GITHUB_QUERIES, per_query=10)
-            stored = store_opportunities(database, opportunities)
+            sources = [
+                (
+                    "GitHub",
+                    "github",
+                    timedelta(hours=1),
+                    lambda: github.collect(queries=DEFAULT_GITHUB_QUERIES, per_query=10),
+                ),
+                ("Jobicy", "jobicy", timedelta(hours=1), lambda: JobicyCollector().collect()),
+                ("Remotive", "remotive", timedelta(hours=6), RemotiveCollector().collect),
+            ]
+            self._emit("log", ("1/3 공개 기회 출처를 수집하는 중…", "info"))
+            total_collected = 0
+            total_inserted = 0
+            for label, source, interval, fetch in sources:
+                result = collect_source(database, source, interval, fetch)
+                if result.cached:
+                    self._emit(
+                        "log", (f"{label}: 최근 결과 사용(호출 제한 보호)", "info")
+                    )
+                elif result.error:
+                    self._emit("log", (f"{label}: 수집 실패 — {result.error}", "error"))
+                else:
+                    total_collected += result.collected
+                    total_inserted += result.inserted
+                    self._emit(
+                        "log",
+                        (
+                            f"{label}: 수집 {result.collected}개 · "
+                            f"새 항목 {result.inserted}개",
+                            "success",
+                        ),
+                    )
             self._emit(
                 "log",
-                (f"수집 {stored.collected}개 · 새 항목 {stored.inserted}개", "success"),
+                (
+                    f"이번 실행 합계 {total_collected}개 · 신규 {total_inserted}개",
+                    "success",
+                ),
             )
 
-            self._emit("log", ("2/4 규칙 기반 필터를 적용하는 중…", "info"))
+            self._emit(
+                "log",
+                ("2/3 지역·직급·보수 필터와 가치 평가를 실행하는 중…", "info"),
+            )
             filtered = apply_filters(database, RuleFilter(settings.min_budget_usd))
             self._emit(
                 "log",
@@ -250,32 +283,29 @@ class MoneyAgentGui:
                 ),
             )
 
-            self._emit("log", ("3/4 API 비용 없는 휴리스틱 평가를 실행하는 중…", "info"))
-            evaluated = evaluate_candidates(database, HeuristicEvaluator(), limit=30)
+            evaluated = evaluate_candidates(database, HeuristicEvaluator(), limit=150)
             self._emit("log", (f"신규 평가 {evaluated.evaluated}개", "success"))
 
-            self._emit("log", ("4/4 기대수익 순위를 계산하는 중…", "info"))
-            rows = database.leaderboard(limit=10)
+            self._emit("log", ("3/3 기회 가치 순위를 계산하는 중…", "info"))
+            rows = database.leaderboard(limit=15)
             stats = database.stats()
             self._emit("results", rows)
             self._emit(
                 "summary",
-                f"누적 {stats['total']}개 · 평가 {stats['evaluated']}개 · 상위 {len(rows)}개 표시",
+                f"누적 {stats['total']}개 · 평가 {stats['evaluated']}개 · "
+                f"상위 {len(rows)}개 표시",
             )
             if rows:
-                self._emit("log", (f"완료: 상위 후보 {len(rows)}개를 표시했습니다.", "success"))
+                self._emit(
+                    "log",
+                    (f"완료: 상위 후보 {len(rows)}개를 표시했습니다.", "success"),
+                )
             else:
                 self._emit(
                     "log",
-                    ("완료: 신뢰도 조건을 충족한 유료 작업이 없습니다.", "warning"),
+                    ("완료: 현재 조건을 충족한 기회가 없습니다.", "warning"),
                 )
             self._emit("done", "완료")
-        except httpx.HTTPStatusError as exc:
-            response = exc.response
-            detail = f"GitHub API 오류 {response.status_code}"
-            if response.status_code in {403, 429}:
-                detail += ": 요청 한도에 도달했을 수 있습니다. .env에 GITHUB_TOKEN을 설정하세요."
-            self._emit("error", detail)
         except Exception as exc:  # GUI boundary: report failures instead of crashing the window.
             self._emit("error", f"{type(exc).__name__}: {exc}")
             self._emit("log", (traceback.format_exc(), "error"))
@@ -298,7 +328,9 @@ class MoneyAgentGui:
                     self._finish_run(payload)
                 elif kind == "error":
                     self._append_log(payload, "error")
-                    self.summary_text.set("실행에 실패했습니다. 아래 로그를 확인하세요.")
+                    self.summary_text.set(
+                        "실행에 실패했습니다. 아래 로그를 확인하세요."
+                    )
                     self._finish_run("오류")
         except queue.Empty:
             pass
@@ -320,16 +352,18 @@ class MoneyAgentGui:
         self._clear_results()
         for index, row in enumerate(rows, 1):
             item_id = f"result-{index}"
-            budget = float(row["budget_max"] or row["budget_min"] or 0)
+            budget = _format_income(row)
+            kind = "원격직" if row["kind"] == "remote_job" else "보상작업"
             self.results.insert(
                 "",
                 END,
                 iid=item_id,
                 values=(
                     f"{float(row['opportunity_score']):.1f}",
-                    f"${budget:,.2f}",
+                    kind,
+                    budget,
                     f"${float(row['expected_profit']):,.2f}",
-                    str(row["source"]),
+                    str(row["source"]).title(),
                     str(row["title"]),
                 ),
             )
@@ -349,6 +383,22 @@ class MoneyAgentGui:
         self.run_button.configure(state="normal", text="다시 탐색")
 
 
+def _format_income(row: dict[str, object]) -> str:
+    raw = row["budget_max"] or row["budget_min"]
+    if raw is None:
+        return "미공개"
+    suffixes = {
+        "one_time": "건",
+        "hourly": "시간",
+        "weekly": "주",
+        "monthly": "월",
+        "annual": "연",
+        "unknown": "",
+    }
+    suffix = suffixes.get(str(row["income_basis"]), "")
+    return f"${float(raw):,.0f}" + (f"/{suffix}" if suffix else "")
+
+
 def main() -> None:
     root = Tk()
     MoneyAgentGui(root)
@@ -357,4 +407,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

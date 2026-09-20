@@ -23,13 +23,28 @@ class Opportunity:
     created_at: str | None = None
     skills: list[str] = field(default_factory=list)
     language: str | None = None
+    kind: str = "bounty"
+    income_basis: str = "one_time"
+    organization: str | None = None
+    location: str | None = None
     status: str = "discovered"
     id: int | None = None
 
     @property
     def content_hash(self) -> str:
         canonical = "\n".join(
-            [self.source, self.external_id, self.title.strip(), self.description.strip()]
+            [
+                self.source,
+                self.external_id,
+                self.title.strip(),
+                self.description.strip(),
+                str(self.budget_min),
+                str(self.budget_max),
+                self.currency,
+                self.kind,
+                self.income_basis,
+                self.location or "",
+            ]
         )
         return sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -60,4 +75,3 @@ class Evaluation:
     input_hash: str
     created_at: str = field(default_factory=utc_now_iso)
     id: int | None = None
-

@@ -1,12 +1,22 @@
+import sqlite3
+from datetime import timedelta
 from pathlib import Path
 
+from money_agent.collectors.common import parse_usd_salary
 from money_agent.collectors.github import _repository_name, extract_usd_amounts
+from money_agent.collectors.jobicy import JobicyCollector
+from money_agent.collectors.remotive import RemotiveCollector
 from money_agent.database import Database
-from money_agent.evaluators import HeuristicEvaluator
+from money_agent.evaluators import HeuristicEvaluator, normalized_income_value
 from money_agent.filters import RuleFilter
 from money_agent.models import Opportunity
 from money_agent.ranking import expected_profit, opportunity_score
-from money_agent.service import apply_filters, evaluate_candidates, store_opportunities
+from money_agent.service import (
+    apply_filters,
+    collect_source,
+    evaluate_candidates,
+    store_opportunities,
+)
 
 
 def sample_opportunity() -> Opportunity:
@@ -29,6 +39,11 @@ def test_repository_name_from_api_url() -> None:
     assert _repository_name("https://api.github.com/repos/openai/openai-python") == (
         "openai/openai-python"
     )
+
+
+def test_parse_salary_ignores_unrelated_hours() -> None:
+    assert parse_usd_salary("$90k - $105k, 35-40 hours per week") == (90_000, 105_000)
+    assert parse_usd_salary("$25/hour") == (25, 25)
 
 
 def test_filter_accepts_automatable_paid_task() -> None:
@@ -54,6 +69,69 @@ def test_filter_rejects_unfunded_bounty_proposal() -> None:
     opportunity = sample_opportunity()
     opportunity.title = "[Bounty proposal] Python task ($25 proposed)"
     assert not RuleFilter().evaluate(opportunity).eligible
+    opportunity.title = "Proposed $25 documentation bounty"
+    assert not RuleFilter().evaluate(opportunity).eligible
+
+
+def test_remote_filter_accepts_global_and_rejects_senior_role() -> None:
+    opportunity = Opportunity(
+        source="jobicy",
+        external_id="remote-1",
+        title="Customer support specialist",
+        description="Help customers through email.",
+        url="https://example.com/remote-1",
+        kind="remote_job",
+        income_basis="annual",
+        location="Worldwide",
+    )
+    assert RuleFilter().evaluate(opportunity).eligible
+    opportunity.title = "Senior customer support manager"
+    assert not RuleFilter().evaluate(opportunity).eligible
+
+
+def test_collectors_normalize_remote_jobs() -> None:
+    jobicy = JobicyCollector._normalize(
+        {
+            "id": 7,
+            "jobTitle": "Writer",
+            "jobDescription": "<p>Write helpful guides.</p>",
+            "url": "https://jobicy.com/jobs/7",
+            "salaryMin": 40_000,
+            "salaryMax": 60_000,
+            "salaryCurrency": "USD",
+            "salaryPeriod": "yearly",
+            "jobGeo": "Anywhere",
+            "companyName": "Example",
+        }
+    )
+    assert jobicy.kind == "remote_job"
+    assert jobicy.income_basis == "annual"
+    assert jobicy.description == "Write helpful guides."
+
+    remotive = RemotiveCollector._normalize(
+        {
+            "id": 8,
+            "title": "Editor",
+            "description": "<div>Edit articles.</div>",
+            "url": "https://remotive.com/jobs/8",
+            "salary": "$25/hour",
+            "candidate_required_location": "Worldwide",
+        }
+    )
+    assert remotive.budget_min == 25
+    assert remotive.location == "Worldwide"
+
+
+def test_income_is_normalized_to_comparable_value() -> None:
+    opportunity = sample_opportunity()
+    opportunity.kind = "remote_job"
+    opportunity.budget_min = 120_000
+    opportunity.budget_max = 120_000
+    opportunity.income_basis = "annual"
+    assert normalized_income_value(opportunity) == 10_000
+    opportunity.budget_min = opportunity.budget_max = 25
+    opportunity.income_basis = "hourly"
+    assert normalized_income_value(opportunity) == 1_000
 
 
 def test_profit_and_score_are_bounded() -> None:
@@ -91,3 +169,57 @@ def test_end_to_end_pipeline(tmp_path: Path) -> None:
     assert evaluated.evaluated == 1
     assert len(database.leaderboard()) == 1
     assert database.stats() == {"eligible": 1, "evaluated": 1, "total": 1}
+
+
+def test_source_refresh_interval_uses_cache(tmp_path: Path) -> None:
+    database = Database(tmp_path / "cache.db")
+    database.initialize()
+    calls = 0
+
+    def fetch() -> list[Opportunity]:
+        nonlocal calls
+        calls += 1
+        return [sample_opportunity()]
+
+    first = collect_source(database, "example", timedelta(hours=1), fetch)
+    second = collect_source(database, "example", timedelta(hours=1), fetch)
+    assert first.inserted == 1
+    assert second.cached
+    assert calls == 1
+
+
+def test_database_migrates_v01_opportunities(tmp_path: Path) -> None:
+    path = tmp_path / "old.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """
+        CREATE TABLE opportunities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            url TEXT NOT NULL,
+            budget_min REAL,
+            budget_max REAL,
+            currency TEXT NOT NULL DEFAULT 'USD',
+            created_at TEXT,
+            skills_json TEXT NOT NULL DEFAULT '[]',
+            language TEXT,
+            status TEXT NOT NULL DEFAULT 'discovered',
+            content_hash TEXT NOT NULL,
+            discovered_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(source, external_id),
+            UNIQUE(url)
+        )
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    Database(path).initialize()
+    connection = sqlite3.connect(path)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(opportunities)")}
+    connection.close()
+    assert {"kind", "income_basis", "organization", "location"} <= columns

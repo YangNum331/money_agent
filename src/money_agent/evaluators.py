@@ -19,10 +19,12 @@ class Evaluator(Protocol):
 
 @dataclass(slots=True)
 class HeuristicEvaluator:
-    name: str = "heuristic-v1"
+    name: str = "heuristic-v2"
 
     def evaluate(self, opportunity: Opportunity) -> Evaluation:
         text = f"{opportunity.title}\n{opportunity.description}".lower()
+        if opportunity.kind == "remote_job":
+            return self._evaluate_remote_job(opportunity, text)
         simple_markers = ("csv", "json", "script", "parser", "bug fix", "automation")
         complex_markers = ("mobile app", "blockchain", "production", "enterprise", "urgent")
         automation = 55 + 7 * sum(marker in text for marker in simple_markers)
@@ -60,6 +62,63 @@ class HeuristicEvaluator:
             automation_score=automation,
             difficulty_score=difficulty,
             success_probability=round(success, 3),
+            competition_risk=competition,
+            platform_risk=platform_risk,
+            expected_hours=hours,
+            api_cost_estimate=api_cost,
+            expected_revenue=revenue,
+            expected_profit=profit,
+            opportunity_score=score,
+            reason=reason,
+            input_hash=opportunity.content_hash,
+        )
+
+    def _evaluate_remote_job(self, opportunity: Opportunity, text: str) -> Evaluation:
+        accessible_markers = (
+            "assistant",
+            "customer support",
+            "data entry",
+            "editor",
+            "entry level",
+            "junior",
+            "marketing",
+            "translation",
+            "writer",
+        )
+        automation = float(min(15 + 5 * sum(marker in text for marker in accessible_markers), 45))
+        difficulty = 48.0
+        if any(marker in text for marker in ("experience required", "bachelor", "degree")):
+            difficulty += 12
+        if any(marker in text for marker in ("entry level", "junior", "no experience")):
+            difficulty -= 12
+        difficulty = min(max(difficulty, 20.0), 90.0)
+        competition = 88.0
+        success = 0.05 if any(marker in text for marker in accessible_markers) else 0.025
+        platform_risk = 15.0
+        hours = 2.0
+        api_cost = 0.15
+        revenue = normalized_income_value(opportunity)
+        risk_cost = revenue * platform_risk / 100 * 0.03
+        profit = expected_profit(revenue, success, api_cost, 0.0, risk_cost)
+        score = opportunity_score(
+            expected_profit_usd=profit,
+            automation_score=automation,
+            success_probability=success,
+            difficulty_score=difficulty,
+            competition_risk=competition,
+            platform_risk=platform_risk,
+            expected_hours=hours,
+        )
+        reason = (
+            "Remote-job estimate; value is one month of salary (or one week for hourly work), "
+            "weighted by a conservative application success probability"
+        )
+        return Evaluation(
+            opportunity_id=_require_id(opportunity),
+            evaluator=self.name,
+            automation_score=automation,
+            difficulty_score=difficulty,
+            success_probability=success,
             competition_risk=competition,
             platform_risk=platform_risk,
             expected_hours=hours,
@@ -125,7 +184,7 @@ class OpenAICompatibleEvaluator:
         platform_risk = _score(data, "platform_risk")
         hours = max(float(data["expected_hours"]), 0.1)
         api_cost = max(float(data["api_cost_estimate"]), 0.0)
-        revenue = opportunity.midpoint_budget or 0.0
+        revenue = normalized_income_value(opportunity)
         platform_cost = revenue * (0.0 if opportunity.source == "github" else 0.1)
         risk_cost = revenue * platform_risk / 100 * 0.08
         profit = expected_profit(revenue, success, api_cost, platform_cost, risk_cost)
@@ -168,3 +227,16 @@ def _score(data: dict[str, object], key: str) -> float:
 
 def _strip_code_fence(value: str) -> str:
     return re.sub(r"^```(?:json)?\s*|\s*```$", "", value.strip(), flags=re.IGNORECASE)
+
+
+def normalized_income_value(opportunity: Opportunity) -> float:
+    amount = opportunity.midpoint_budget or 0.0
+    factors = {
+        "one_time": 1.0,
+        "hourly": 40.0,
+        "weekly": 4.0,
+        "monthly": 1.0,
+        "annual": 1 / 12,
+        "unknown": 0.0,
+    }
+    return round(amount * factors.get(opportunity.income_basis, 0.0), 2)
